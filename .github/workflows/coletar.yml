@@ -1,0 +1,40 @@
+name: Coletar dados dos rios
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: coleta-rios
+  cancel-in-progress: false
+jobs:
+  coletar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Baixar historico atual
+        run: |
+          mkdir -p dados
+          if git fetch --depth=1 origin dados; then
+            git show FETCH_HEAD:historico.csv > dados/historico.csv || true
+          fi
+      - run: python coletor.py
+      - name: Publicar na branch dados
+        run: |
+          mkdir -p /tmp/pub
+          cp dados/historico.csv /tmp/pub/
+          cd /tmp/pub
+          git init -q -b dados
+          git config user.name "coletor-rios"
+          git config user.email "coletor-rios@users.noreply.github.com"
+          git add historico.csv
+          git commit -q -m "dados $(date -u +%FT%TZ)"
+          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git push -f origin dados
