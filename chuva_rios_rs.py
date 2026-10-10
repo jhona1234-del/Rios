@@ -1,0 +1,602 @@
+"""
+Monitor de Chuva e Rios do RS  (Defesa Civil RS - Rede Hidrometeorologica)
+
+Como rodar:
+    pip install streamlit requests pandas altair
+    streamlit run chuva_rios_rs.py
+
+Fonte: API GraphQL publica
+    https://redehidrometeorologica.defesacivil.rs.gov.br/graphql
+Documentacao:
+    https://sistemas.defesacivil.rs.gov.br/api-redehidrometeorologica
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta
+
+import altair as alt
+import pandas as pd
+import requests
+import streamlit as st
+
+# --------------------------------------------------------------------------- #
+# Configuracao da API
+# --------------------------------------------------------------------------- #
+API_URL = "https://redehidrometeorologica.defesacivil.rs.gov.br/graphql"
+CLIENT = "casa-militar-defesa-civil-rs"
+SYSTEM = "Qualle_Hidrometeorologia"
+UF_RS = "43"  # codigo IBGE do Rio Grande do Sul
+TIMEOUT = 45
+HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (monitor-chuva-rios-rs)",
+}
+
+# rotulo amigavel -> campo em chuva.acumulado
+JANELAS_CHUVA = {
+    "1 hora": "h001",
+    "3 horas": "h003",
+    "6 horas": "h006",
+    "12 horas": "h012",
+    "24 horas": "h024",
+    "48 horas": "h048",
+    "72 horas": "h072",
+    "7 dias": "h168",
+}
+
+# rotulo amigavel -> valor do enum `interval` na consulta historic
+INTERVALOS_HIST = {
+    "5 minutos": "MIN_5",
+    "15 minutos": "MIN_15",
+    "30 minutos": "MIN_30",
+    "1 hora": "HOUR_1",
+    "3 horas": "HOUR_3",
+    "6 horas": "HOUR_6",
+    "12 horas": "HOUR_12",
+    "24 horas": "HOUR_24",
+}
+
+QUERY_TEMPLATE = """
+query Estacoes {
+  tags_data(
+    clients: ["%CLIENT%"]
+    filters: { localizacao: [{ codigos: ["%UF%"], tipo: UNIDADE_FEDERATIVA }] }
+  ) {
+    qualle_meteorologia {
+      codigo
+      name { prefix general local }
+      timestamp
+      position { bacia latitude longitude regiao altitude }
+      data {
+        %RIO%
+        chuva { acumulado { %ACUM% } }
+      }
+    }
+  }
+}
+"""
+
+RIO_BLOCK = (
+    "rio { rio_nome { value } rio_nivel { value } "
+    "rio_nivel_tendencia { value } rio_area_drenagem { value } }"
+)
+
+
+class ApiError(RuntimeError):
+    pass
+
+
+# --------------------------------------------------------------------------- #
+# Camada de acesso a API
+# --------------------------------------------------------------------------- #
+def gql(query: str) -> dict:
+    """Envia uma consulta GraphQL e devolve o JSON de resposta."""
+    resp = requests.post(
+        API_URL, json={"query": query}, headers=HEADERS, timeout=TIMEOUT
+    )
+    try:
+        return resp.json()
+    except ValueError:
+        resp.raise_for_status()
+        raise ApiError(f"Resposta nao-JSON da API (HTTP {resp.status_code}).")
+
+
+def _montar_query(janelas: list[str], com_rio: bool) -> str:
+    return (
+        QUERY_TEMPLATE.replace("%CLIENT%", CLIENT)
+        .replace("%UF%", UF_RS)
+        .replace("%RIO%", RIO_BLOCK if com_rio else "")
+        .replace("%ACUM%", " ".join(f"{j} {{ value }}" for j in janelas))
+    )
+
+
+def _achar_estacoes(obj):
+    """Percorre o JSON e devolve todos os dicts que parecem uma estacao."""
+    if isinstance(obj, dict):
+        if "codigo" in obj and ("data" in obj or "position" in obj):
+            yield obj
+        else:
+            for v in obj.values():
+                yield from _achar_estacoes(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _achar_estacoes(item)
+
+
+def _val(d, *path):
+    """Navega em dicts aninhados e desembrulha {'value': x}."""
+    for p in path:
+        if not isinstance(d, dict):
+            return None
+        d = d.get(p)
+    if isinstance(d, dict) and "value" in d:
+        d = d["value"]
+    return d
+
+
+def _estacao_para_linha(est: dict) -> dict:
+    nome = est.get("name") or {}
+    partes = []
+    for k in ("prefix", "general", "local"):
+        v = (nome.get(k) or "").strip() if isinstance(nome.get(k), str) else ""
+        if v and v not in partes:
+            partes.append(v)
+    cidade = None
+    for k in ("local", "general"):
+        v = nome.get(k)
+        if isinstance(v, str) and v.strip():
+            cidade = v.strip()
+            break
+
+    pos = est.get("position") or {}
+    linha = {
+        "codigo": est.get("codigo"),
+        "nome": " - ".join(partes) if partes else est.get("codigo"),
+        "cidade": cidade,
+        "bacia": pos.get("bacia"),
+        "regiao": pos.get("regiao"),
+        "lat": pos.get("latitude"),
+        "lon": pos.get("longitude"),
+        "altitude": pos.get("altitude"),
+        "timestamp": est.get("timestamp"),
+        "rio_nome": _val(est, "data", "rio", "rio_nome"),
+        "rio_nivel": _val(est, "data", "rio", "rio_nivel"),
+        "rio_tendencia": _val(est, "data", "rio", "rio_nivel_tendencia"),
+        "rio_area": _val(est, "data", "rio", "rio_area_drenagem"),
+    }
+    acum = _val(est, "data", "chuva", "acumulado")
+    acum = acum if isinstance(acum, dict) else {}
+    for campo in JANELAS_CHUVA.values():
+        v = acum.get(campo)
+        linha[f"chuva_{campo}"] = v.get("value") if isinstance(v, dict) else v
+    return linha
+
+
+def _parse_ts(serie: pd.Series) -> pd.Series:
+    num = pd.to_numeric(serie, errors="coerce")
+    if num.notna().mean() > 0.5:
+        med = num.median()
+        if med > 1e11:
+            return pd.to_datetime(num, unit="ms", errors="coerce")
+        if med > 1e8:
+            return pd.to_datetime(num, unit="s", errors="coerce")
+    dt = pd.to_datetime(serie, errors="coerce", utc=True)
+    try:
+        return dt.dt.tz_convert("America/Sao_Paulo").dt.tz_localize(None)
+    except Exception:
+        return dt
+
+
+def montar_dataframe(payload: dict) -> pd.DataFrame:
+    linhas = [_estacao_para_linha(e) for e in _achar_estacoes(payload.get("data"))]
+    df = pd.DataFrame(linhas)
+    if df.empty:
+        return df
+    df = df.drop_duplicates(subset="codigo", keep="last").reset_index(drop=True)
+
+    num_cols = ["lat", "lon", "altitude", "rio_nivel", "rio_area"] + [
+        c for c in df.columns if c.startswith("chuva_")
+    ]
+    for c in num_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["ultima_leitura"] = _parse_ts(df["timestamp"])
+    df["bacia"] = df["bacia"].fillna("(sem bacia)").astype(str)
+    df["cidade"] = df["cidade"].fillna("(sem cidade)").astype(str)
+    df["rio_nome"] = df["rio_nome"].where(df["rio_nome"].notna(), None)
+
+    # rotulo unico para graficos (evita fundir estacoes com o mesmo nome)
+    dup = df["nome"].duplicated(keep=False)
+    df["rotulo"] = df["nome"].where(~dup, df["nome"] + " (" + df["codigo"] + ")")
+    return df
+
+
+@st.cache_data(ttl=120, show_spinner="Buscando dados da Defesa Civil RS...")
+def carregar_estacoes() -> tuple[pd.DataFrame, dict]:
+    """Tenta a consulta completa e vai simplificando se a API recusar campos."""
+    todas = list(JANELAS_CHUVA.values())
+    niveis = [
+        ("completa", todas, True),
+        ("janelas reduzidas", ["h001", "h024"], True),
+        ("sem dados de rio", ["h001", "h024"], False),
+    ]
+    erros: list[str] = []
+    for nome, janelas, com_rio in niveis:
+        try:
+            payload = gql(_montar_query(janelas, com_rio))
+        except Exception as exc:  # rede, timeout, etc.
+            erros.append(f"[{nome}] {type(exc).__name__}: {exc}")
+            continue
+        if payload.get("errors"):
+            msgs = "; ".join(str(e.get("message")) for e in payload["errors"][:3])
+            erros.append(f"[{nome}] GraphQL: {msgs}")
+            if not payload.get("data"):
+                continue
+        df = montar_dataframe(payload)
+        if not df.empty:
+            amostra = next(_achar_estacoes(payload.get("data")), {})
+            return df, {"nivel": nome, "erros": erros, "amostra": amostra}
+        erros.append(f"[{nome}] resposta sem estacoes reconheciveis")
+    raise ApiError("\n".join(erros) or "Falha desconhecida.")
+
+
+@st.cache_data(ttl=300, show_spinner="Buscando historico...")
+def carregar_historico(codigo: str, inicio: str, fim: str, intervalo: str):
+    q = (
+        "query Historic { historic("
+        f"system: {SYSTEM} client: \"{CLIENT}\" stationCode: \"{codigo}\" "
+        f"startDate: \"{inicio}\" endDate: \"{fim}\" interval: {intervalo}) }}"
+    )
+    payload = gql(q)
+    if payload.get("errors") and not payload.get("data"):
+        msgs = "; ".join(str(e.get("message")) for e in payload["errors"][:3])
+        raise ApiError(msgs)
+    return payload.get("data", {}).get("historic")
+
+
+def historico_para_df(obj) -> pd.DataFrame:
+    """Normaliza a resposta (formato livre) de `historic` em uma tabela."""
+    if isinstance(obj, str):
+        try:
+            obj = json.loads(obj)
+        except ValueError:
+            return pd.DataFrame()
+
+    def achar_lista(o):
+        if isinstance(o, list) and o and all(isinstance(i, dict) for i in o):
+            return o
+        if isinstance(o, dict):
+            for v in o.values():
+                r = achar_lista(v)
+                if r is not None:
+                    return r
+        return None
+
+    lista = achar_lista(obj)
+    if lista is None:
+        return pd.DataFrame()
+    df = pd.json_normalize(lista)
+
+    chaves = ("timestamp", "datetime", "date", "data", "time", "hora", "dt")
+    for col in df.columns:
+        if any(k in col.lower() for k in chaves):
+            t = _parse_ts(df[col])
+            if t.notna().mean() > 0.8:
+                df[col] = t
+                df = df.set_index(col).sort_index()
+                break
+    for col in df.columns:
+        conv = pd.to_numeric(df[col], errors="coerce")
+        if conv.notna().mean() > 0.5:
+            df[col] = conv
+    return df
+
+
+# --------------------------------------------------------------------------- #
+# Utilidades de interface
+# --------------------------------------------------------------------------- #
+def seta_tendencia(v) -> str:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "-"
+    try:
+        f = float(v)
+        return "⬆️ subindo" if f > 0 else "⬇️ descendo" if f < 0 else "➡️ estavel"
+    except (TypeError, ValueError):
+        s = str(v).lower()
+        if any(k in s for k in ("desc", "baix", "dec", "down", "fall")):
+            return f"⬇️ {v}"
+        if any(k in s for k in ("sub", "cres", "up", "rise")):
+            return f"⬆️ {v}"
+        if any(k in s for k in ("est", "stab", "const")):
+            return f"➡️ {v}"
+        return str(v)
+
+
+def barras(d: pd.DataFrame, cat: str, val: str, titulo: str, cor: str):
+    chart = (
+        alt.Chart(d)
+        .mark_bar(color=cor)
+        .encode(
+            y=alt.Y(f"{cat}:N", sort="-x", title=None),
+            x=alt.X(f"{val}:Q", title=titulo),
+            tooltip=[cat, alt.Tooltip(val, format=".1f", title=titulo)],
+        )
+        .properties(height=max(180, 26 * len(d)))
+    )
+    st.altair_chart(chart)
+
+
+def agregar(df: pd.DataFrame, por: str, col: str) -> pd.DataFrame:
+    """Devolve tabela [rotulo, valor, estacoes] conforme o agrupamento."""
+    base = df.dropna(subset=[col])
+    if por == "Estação":
+        out = base[["rotulo", col]].rename(columns={col: "valor"})
+        out["estacoes"] = 1
+        return out
+    chave = "bacia" if por == "Bacia" else "cidade"
+    g = base.groupby(chave).agg(valor=(col, "max"), estacoes=("codigo", "count"))
+    return g.reset_index().rename(columns={chave: "rotulo"})
+
+
+def filtros_laterais(df: pd.DataFrame) -> pd.DataFrame:
+    with st.sidebar:
+        st.header("Filtros")
+        if st.button("🔄 Atualizar dados", type="primary"):
+            st.cache_data.clear()
+            st.rerun()
+        st.caption("Os dados ficam em cache por 2 minutos.")
+
+        bacias = sorted(df["bacia"].unique())
+        sel_bacias = st.multiselect("Bacia hidrográfica", bacias, placeholder="Todas")
+
+        df_b = df[df["bacia"].isin(sel_bacias)] if sel_bacias else df
+        cidades = sorted(df_b["cidade"].unique())
+        sel_cidades = st.multiselect("Cidade / local", cidades, placeholder="Todas")
+
+        busca = st.text_input("Buscar estação ou rio", placeholder="ex.: Guaíba, Taquari")
+
+    out = df_b
+    if sel_cidades:
+        out = out[out["cidade"].isin(sel_cidades)]
+    if busca.strip():
+        b = busca.strip()
+        mask = (
+            out["nome"].astype(str).str.contains(b, case=False, regex=False)
+            | out["codigo"].astype(str).str.contains(b, case=False, regex=False)
+            | out["rio_nome"].astype(str).str.contains(b, case=False, regex=False)
+        )
+        out = out[mask]
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Abas
+# --------------------------------------------------------------------------- #
+def aba_chuva(df: pd.DataFrame):
+    janelas = {
+        r: c for r, c in JANELAS_CHUVA.items()
+        if f"chuva_{c}" in df and df[f"chuva_{c}"].notna().any()
+    }
+    if not janelas:
+        st.info("Nenhuma estação com dado de chuva nos filtros atuais.")
+        return
+    c1, c2, c3 = st.columns([2, 2, 1])
+    rotulo_j = c1.selectbox(
+        "Chuva acumulada nas últimas", list(janelas), index=min(4, len(janelas) - 1)
+    )
+    por = c2.radio("Agrupar por", ["Estação", "Bacia", "Cidade"], horizontal=True)
+    topn = c3.selectbox("Mostrar", [10, 20, 50], index=1)
+    col = f"chuva_{janelas[rotulo_j]}"
+
+    base = df.dropna(subset=[col])
+    maior = base.loc[base[col].idxmax()]
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Estações com dado", len(base))
+    m2.metric("Maior acumulado", f"{maior[col]:.1f} mm", maior["nome"], delta_color="off")
+    m3.metric("Média das estações", f"{base[col].mean():.1f} mm")
+
+    agg = agregar(df, por, col).sort_values("valor", ascending=False).head(topn)
+    suf = "" if por == "Estação" else " (máx. do grupo)"
+    barras(agg, "rotulo", "valor", f"Chuva {rotulo_j} (mm){suf}", "#2b7de9")
+
+    with st.expander("Tabela completa", expanded=False):
+        cols = ["nome", "cidade", "bacia"] + [f"chuva_{c}" for c in janelas.values()]
+        cols += ["ultima_leitura"]
+        cfg = {
+            f"chuva_{c}": st.column_config.NumberColumn(f"{r} (mm)", format="%.1f")
+            for r, c in janelas.items()
+        }
+        cfg[col] = st.column_config.ProgressColumn(
+            f"{rotulo_j} (mm)", format="%.1f",
+            min_value=0.0, max_value=float(max(base[col].max(), 1)),
+        )
+        cfg.update({"nome": "Estação", "cidade": "Cidade/local", "bacia": "Bacia",
+                    "ultima_leitura": "Última leitura"})
+        st.dataframe(df.sort_values(col, ascending=False)[cols],
+                     column_config=cfg, hide_index=True)
+
+
+def aba_rios(df: pd.DataFrame):
+    if "rio_nivel" not in df or df["rio_nivel"].notna().sum() == 0:
+        st.info("Nenhuma estação com nível de rio nos filtros atuais "
+                "(ou a API não retornou esse campo; veja a aba Diagnóstico).")
+        return
+    r = df.dropna(subset=["rio_nivel"]).copy()
+    r["tendencia"] = r["rio_tendencia"].map(seta_tendencia)
+    r["rio_estacao"] = (r["rio_nome"].fillna("").astype(str).str.strip()
+                        .where(lambda s: s != "", r["nome"]))
+
+    c1, c2 = st.columns([2, 1])
+    por = c1.radio("Agrupar por", ["Estação", "Bacia", "Cidade"],
+                   horizontal=True, key="rio_por")
+    topn = c2.selectbox("Mostrar", [10, 20, 50], index=1, key="rio_topn")
+
+    subindo = int(r["tendencia"].str.contains("⬆️").sum())
+    maior = r.loc[r["rio_nivel"].idxmax()]
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Estações de rio", len(r))
+    m2.metric("Maior nível", f"{maior['rio_nivel']:.2f} m", maior["nome"], delta_color="off")
+    m3.metric("Rios subindo", subindo)
+
+    agg = agregar(r, por, "rio_nivel").sort_values("valor", ascending=False).head(topn)
+    suf = "" if por == "Estação" else " (máx. do grupo)"
+    barras(agg, "rotulo", "valor", f"Nível do rio (m){suf}", "#0f9d8a")
+
+    st.caption("A API informa o nível atual e a tendência, mas não os limiares de "
+               "alerta/inundação de cada estação.")
+    cols = ["rio_estacao", "nome", "cidade", "bacia", "rio_nivel", "tendencia",
+            "rio_area", "ultima_leitura"]
+    cfg = {
+        "rio_estacao": "Rio", "nome": "Estação", "cidade": "Cidade/local",
+        "bacia": "Bacia",
+        "rio_nivel": st.column_config.NumberColumn("Nível (m)", format="%.2f"),
+        "tendencia": "Tendência",
+        "rio_area": st.column_config.NumberColumn("Área drenagem", format="%.0f"),
+        "ultima_leitura": "Última leitura",
+    }
+    st.dataframe(r.sort_values("rio_nivel", ascending=False)[cols],
+                 column_config=cfg, hide_index=True)
+
+
+def aba_mapa(df: pd.DataFrame):
+    modo = st.radio("Mostrar no mapa", ["Chuva", "Nível do rio"], horizontal=True)
+    if modo == "Chuva":
+        janelas = {r: c for r, c in JANELAS_CHUVA.items()
+                   if f"chuva_{c}" in df and df[f"chuva_{c}"].notna().any()}
+        if not janelas:
+            st.info("Sem dados de chuva para exibir.")
+            return
+        rj = st.selectbox("Janela", list(janelas), index=min(4, len(janelas) - 1),
+                          key="mapa_j")
+        col, cor, escala = f"chuva_{janelas[rj]}", "#2b7de9", 800
+    else:
+        col, cor, escala = "rio_nivel", "#0f9d8a", 1500
+        if col not in df:
+            st.info("Sem dados de rio para exibir.")
+            return
+    m = df.dropna(subset=["lat", "lon", col]).copy()
+    if m.empty:
+        st.info("Nenhuma estação com coordenadas e dado para esse filtro.")
+        return
+    m["tamanho"] = 1500 + m[col].clip(lower=0) * escala
+    st.map(m, latitude="lat", longitude="lon", size="tamanho", color=cor)
+    st.caption("O tamanho do círculo é proporcional ao valor medido.")
+
+
+def aba_historico(df: pd.DataFrame):
+    st.write("Série histórica de uma estação.")
+    opcoes = df.sort_values("nome")
+    codigo = st.selectbox(
+        "Estação", opcoes["codigo"],
+        format_func=lambda c: f"{opcoes.set_index('codigo').loc[c, 'nome']}  ({c})",
+    )
+    c1, c2 = st.columns(2)
+    periodo = c1.selectbox("Período", ["Últimas 24 horas", "Últimos 3 dias",
+                                       "Últimos 7 dias"])
+    intervalo_lbl = c2.selectbox("Agregação", list(INTERVALOS_HIST), index=3)
+    horas = {"Últimas 24 horas": 24, "Últimos 3 dias": 72, "Últimos 7 dias": 168}[periodo]
+
+    fim = datetime.now().replace(second=0, microsecond=0)
+    ini = fim - timedelta(hours=horas)
+    fmt = "%Y-%m-%d %H:%M:%S"
+
+    if not st.button("Carregar histórico"):
+        return
+    try:
+        bruto = carregar_historico(codigo, ini.strftime(fmt), fim.strftime(fmt),
+                                   INTERVALOS_HIST[intervalo_lbl])
+    except Exception as exc:
+        st.error(f"Não foi possível obter o histórico: {exc}")
+        return
+    tab = historico_para_df(bruto)
+    if tab.empty:
+        st.warning("A API respondeu, mas não consegui montar uma tabela. "
+                   "Veja a resposta bruta abaixo.")
+    else:
+        numericas = [c for c in tab.columns if pd.api.types.is_numeric_dtype(tab[c])]
+        if numericas:
+            sel = st.multiselect("Séries no gráfico", numericas, default=numericas[:3])
+            if sel:
+                st.line_chart(tab[sel])
+        st.dataframe(tab)
+        st.download_button("⬇️ Baixar CSV", tab.to_csv().encode("utf-8"),
+                           file_name=f"historico_{codigo}.csv", mime="text/csv")
+    with st.expander("Resposta bruta da API"):
+        st.json(bruto if not isinstance(bruto, str) else {"historic": bruto})
+
+
+def aba_diagnostico(meta: dict | None, erro: str | None = None):
+    st.write("Útil para descobrir quais dados a API realmente oferece.")
+    if erro:
+        st.error("Falhas ao buscar estações:")
+        st.code(erro)
+    if meta:
+        st.write(f"Consulta bem-sucedida no nível: **{meta['nivel']}**")
+        if meta["erros"]:
+            st.warning("Tentativas anteriores que falharam:")
+            st.code("\n".join(meta["erros"]))
+        with st.expander("Exemplo de estação (JSON bruto)"):
+            st.json(meta["amostra"])
+
+    st.subheader("Explorar o esquema GraphQL")
+    if st.button("Listar consultas disponíveis (introspection)"):
+        q = ("{ __schema { queryType { fields { name args { name type { name kind "
+             "ofType { name } } } } } subscriptionType { fields { name } } } }")
+        try:
+            st.json(gql(q))
+        except Exception as exc:
+            st.error(str(exc))
+
+    st.subheader("Consulta livre")
+    q = st.text_area("GraphQL", value="{ __typename }", height=140)
+    if st.button("Executar consulta"):
+        try:
+            st.json(gql(q))
+        except Exception as exc:
+            st.error(str(exc))
+
+
+# --------------------------------------------------------------------------- #
+# App
+# --------------------------------------------------------------------------- #
+def main():
+    st.set_page_config(page_title="Chuva e Rios - RS", page_icon="🌧️", layout="wide")
+    st.title("🌧️ Chuva e níveis de rios no RS")
+    st.caption("Rede Hidrometeorológica da Defesa Civil RS · dados em quase tempo real")
+
+    try:
+        df, meta = carregar_estacoes()
+    except Exception as exc:
+        st.error("Não consegui carregar os dados da API.")
+        aba_diagnostico(None, str(exc))
+        st.stop()
+
+    filtrado = filtros_laterais(df)
+
+    ult = df["ultima_leitura"].max()
+    st.caption(
+        f"{len(filtrado)} de {len(df)} estações exibidas"
+        + (f" · leitura mais recente: {ult:%d/%m/%Y %H:%M}" if pd.notna(ult) else "")
+    )
+    if filtrado.empty:
+        st.warning("Nenhuma estação com esses filtros.")
+        st.stop()
+
+    t_chuva, t_rios, t_mapa, t_hist, t_diag = st.tabs(
+        ["🌧️ Chuva", "🌊 Rios", "🗺️ Mapa", "📈 Histórico", "🛠️ Diagnóstico"]
+    )
+    with t_chuva:
+        aba_chuva(filtrado)
+    with t_rios:
+        aba_rios(filtrado)
+    with t_mapa:
+        aba_mapa(filtrado)
+    with t_hist:
+        aba_historico(filtrado)
+    with t_diag:
+        aba_diagnostico(meta)
+
+
+if __name__ == "__main__":
+    main()
