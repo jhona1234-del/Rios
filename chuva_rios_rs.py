@@ -2,7 +2,7 @@
 Monitor de Chuva e Rios do RS  (Defesa Civil RS - Rede Hidrometeorologica)
 
 Como rodar:
-    pip install streamlit requests pandas altair
+    pip install streamlit requests pandas altair urllib3
     streamlit run chuva_rios_rs.py
 
 Fonte: API GraphQL publica
@@ -19,12 +19,16 @@ from __future__ import annotations
 import io
 import json
 import os
+import urllib3
 from datetime import datetime, timedelta
 
 import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
+
+# Desabilita os avisos de InsecureRequestWarning gerados pelo verify=False
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --------------------------------------------------------------------------- #
 # Configuracao
@@ -106,8 +110,9 @@ class ApiError(RuntimeError):
 # --------------------------------------------------------------------------- #
 def gql(query: str) -> dict:
     """Envia uma consulta GraphQL e devolve o JSON de resposta."""
+    # Adicionado verify=False para ignorar o erro de SSL expirado da Defesa Civil
     resp = requests.post(
-        API_URL, json={"query": query}, headers=HEADERS, timeout=TIMEOUT
+        API_URL, json={"query": query}, headers=HEADERS, timeout=TIMEOUT, verify=False
     )
     try:
         return resp.json()
@@ -239,7 +244,8 @@ def montar_dataframe(payload: dict) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=120, show_spinner="Buscando dados da Defesa Civil RS...")
+# Alterado show_spinner=False para evitar o erro "Cursor is not set" quando importado por scripts locais
+@st.cache_data(ttl=120, show_spinner=False)
 def carregar_estacoes() -> tuple[pd.DataFrame, dict]:
     """Tenta a consulta completa e vai simplificando se a API recusar campos."""
     todas = list(JANELAS_CHUVA.values())
@@ -268,7 +274,8 @@ def carregar_estacoes() -> tuple[pd.DataFrame, dict]:
     raise ApiError("\n".join(erros) or "Falha desconhecida.")
 
 
-@st.cache_data(ttl=300, show_spinner="Buscando historico...")
+# Alterado show_spinner=False 
+@st.cache_data(ttl=300, show_spinner=False)
 def carregar_historico(codigo: str, inicio: str, fim: str, intervalo: str):
     q = (
         "query Historic { historic("
@@ -757,14 +764,14 @@ def aba_mapa(df: pd.DataFrame):
         if col not in df:
             st.info("Sem dados de rio para exibir.")
             return
-    m = df.dropna(subset=["lat", "lon", col]).copy()
-    if m.empty:
-        st.info("Nenhuma estação com coordenadas e dado para esse filtro.")
-        return
-    valor = m[col].clip(lower=0)
-    m["tamanho"] = 1500 + 12000 * valor / max(float(valor.max()), 1.0)
-    st.map(m, latitude="lat", longitude="lon", size="tamanho", color=cor)
-    st.caption("O tamanho do círculo é proporcional ao valor medido.")
+        m = df.dropna(subset=["lat", "lon", col]).copy()
+        if m.empty:
+            st.info("Nenhuma estação com coordenadas e dado para esse filtro.")
+            return
+        valor = m[col].clip(lower=0)
+        m["tamanho"] = 1500 + 12000 * valor / max(float(valor.max()), 1.0)
+        st.map(m, latitude="lat", longitude="lon", size="tamanho", color=cor)
+        st.caption("O tamanho do círculo é proporcional ao valor medido.")
 
 
 def aba_historico(df: pd.DataFrame):
@@ -853,12 +860,15 @@ def aba_diagnostico(meta: dict | None, erro: str | None = None,
 # App
 # --------------------------------------------------------------------------- #
 def main():
+    # Descomente e use um context do streamlit internamente se quiser spinners na UI
+    # with st.spinner("Buscando dados..."):
     st.set_page_config(page_title="Chuva e Rios - RS", page_icon="🌧️", layout="wide")
     st.title("🌊 Rios e chuva no RS")
     st.caption("Rede Hidrometeorológica da Defesa Civil RS · dados em quase tempo real")
 
     try:
-        df, meta = carregar_estacoes()
+        with st.spinner("Buscando dados da Defesa Civil RS..."):
+            df, meta = carregar_estacoes()
     except Exception as exc:
         st.error("Não consegui carregar os dados da API.")
         aba_diagnostico(None, str(exc))
