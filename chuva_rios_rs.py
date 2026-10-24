@@ -58,9 +58,6 @@ JANELAS_CHUVA = {
     "6 horas": "h006",
     "12 horas": "h012",
     "24 horas": "h024",
-    "48 horas": "h048",
-    "72 horas": "h072",
-    "7 dias": "h168",
 }
 
 # rotulo amigavel -> valor do enum `interval` na consulta historic
@@ -79,7 +76,6 @@ QUERY_TEMPLATE = """
 query Estacoes {
   tags_data(
     clients: ["%CLIENT%"]
-    filters: { localizacao: [{ codigos: ["%UF%"], tipo: UNIDADE_FEDERATIVA }] }
   ) {
     qualle_meteorologia {
       codigo
