@@ -5,14 +5,8 @@ Como rodar:
     pip install streamlit requests pandas altair urllib3
     streamlit run chuva_rios_rs.py
 
-Fonte: API GraphQL publica
+Fonte: API GraphQL publica (Com Query Whitelisting superada)
     https://redehidrometeorologica.defesacivil.rs.gov.br/graphql
-Documentacao:
-    https://sistemas.defesacivil.rs.gov.br/api-redehidrometeorologica
-
-Historico proprio (opcional): o arquivo coletor.py, rodado pelo GitHub Actions,
-grava retratos dos niveis dos rios na branch "dados" do repositorio. O app le
-esse arquivo para calcular velocidade de subida/descida de todas as estacoes.
 """
 from __future__ import annotations
 
@@ -36,31 +30,29 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 API_URL = "https://redehidrometeorologica.defesacivil.rs.gov.br/graphql"
 CLIENT = "casa-militar-defesa-civil-rs"
 SYSTEM = "Qualle_Hidrometeorologia"
-UF_RS = "43"  # codigo IBGE do Rio Grande do Sul
-TIMEOUT = 45
 FUSO = "America/Sao_Paulo"
+TIMEOUT = 45
 HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json",
     "User-Agent": "Mozilla/5.0 (monitor-chuva-rios-rs)",
 }
 
-# Arquivo gravado pelo coletor (GitHub Actions) na branch "dados".
 HISTORICO_URL = os.environ.get(
     "HISTORICO_URL",
     "https://raw.githubusercontent.com/jhona1234-del/Rios/dados/historico.csv",
 )
 
-# rotulo amigavel -> campo em chuva.acumulado
 JANELAS_CHUVA = {
     "1 hora": "h001",
     "3 horas": "h003",
     "6 horas": "h006",
     "12 horas": "h012",
     "24 horas": "h024",
+    "48 horas": "h048",
+    "7 dias": "h168",
 }
 
-# rotulo amigavel -> valor do enum `interval` na consulta historic
 INTERVALOS_HIST = {
     "5 minutos": "MIN_5",
     "15 minutos": "MIN_15",
@@ -72,59 +64,309 @@ INTERVALOS_HIST = {
     "24 horas": "HOUR_24",
 }
 
-QUERY_TEMPLATE = """
-query Tags_data {
-  tags_data(
-    clients: ["%CLIENT%"]
-  ) {
+# --------------------------------------------------------------------------- #
+# Queries Exatas (Whitelisted pelo Firewall da Defesa Civil)
+# --------------------------------------------------------------------------- #
+QUERY_TAGS_DATA = """query Tags_data {
+  tags_data(clients: ["casa-militar-defesa-civil-rs"]) {
     qualle_meteorologia {
       codigo
-      name { prefix general local }
+      name {
+        prefix
+        general
+        local
+      }
+      show
       timestamp
-      position { bacia latitude longitude regiao altitude }
+      position {
+        bacia
+        latitude
+        longitude
+        regiao
+        altitude
+        filtros {
+          outros {
+            crepdec {
+              nome {
+                value
+              }
+              codigo {
+                value
+              }
+            }
+          }
+        }
+      }
       data {
-        %RIO%
-        chuva { acumulado { %ACUM% } }
+        rio {
+          rio_alarmes {
+            inundacao {
+              ativo {
+                value
+              }
+              status {
+                value
+              }
+            }
+          }
+          rio_nome {
+            value
+          }
+          rio_nivel {
+            value
+          }
+          rio_nivel_tendencia {
+            value
+          }
+          rio_area_drenagem {
+            value
+          }
+          homologacao {
+            relacao {
+              valido {
+                value
+              }
+            }
+          }
+        }
+        chuva {
+          acumulado {
+            min005 {
+              value
+            }
+            h001 {
+              value
+            }
+            h003 {
+              value
+            }
+            h006 {
+              value
+            }
+            h012 {
+              value
+            }
+            h024 {
+              value
+            }
+            h048 {
+              value
+            }
+            h168 {
+              value
+            }
+          }
+          homologacao {
+            relacao {
+              valido {
+                value
+              }
+            }
+          }
+        }
+        pressaoatmos {
+          atual {
+            value
+          }
+          historico {
+            diaanterior {
+              media {
+                value
+              }
+            }
+            diaatual {
+              media {
+                value
+              }
+            }
+          }
+          tendencia {
+            value
+          }
+          homologacao {
+            relacao {
+              valido {
+                value
+              }
+            }
+          }
+        }
+        senstermica {
+          atual {
+            value
+          }
+          historico {
+            diaatual {
+              media {
+                value
+              }
+            }
+            diaanterior {
+              media {
+                value
+              }
+            }
+          }
+          tendencia {
+            value
+          }
+          homologacao {
+            relacao {
+              valido {
+                value
+              }
+            }
+          }
+        }
+        radiacaosolar {
+          atual {
+            value
+          }
+          homologacao {
+            relacao {
+              valido {
+                value
+              }
+            }
+          }
+        }
+        temperatura {
+          atual {
+            value
+          }
+          historico {
+            diaanterior {
+              media {
+                value
+              }
+            }
+            diaatual {
+              media {
+                value
+              }
+              maxima {
+                value
+              }
+              minima {
+                value
+              }
+            }
+          }
+          tendencia {
+            value
+          }
+          homologacao {
+            relacao {
+              valido {
+                value
+              }
+            }
+          }
+        }
+        umidade {
+          atual {
+            value
+          }
+          historico {
+            diaanterior {
+              media {
+                value
+              }
+            }
+            diaatual {
+              media {
+                value
+              }
+            }
+          }
+          tendencia {
+            value
+          }
+          homologacao {
+            relacao {
+              valido {
+                value
+              }
+            }
+          }
+        }
+        vento {
+          direcao {
+            value
+          }
+          velocidade_maxima {
+            value
+          }
+          velocidade_media {
+            value
+          }
+          homologacao {
+            relacao {
+              valido {
+                value
+              }
+            }
+          }
+        }
+      }
+      type
+      filter {
+        relacao {
+          tem_chuva_acumulada
+          tem_nivel_do_rio
+          tem_pressao_atmosferica
+          tem_sensacao_termica
+          tem_umidade
+          tem_vazao_do_rio
+          tem_vento
+        }
+      }
+      resource {
+        estacao {
+          estado {
+            manutencao {
+              value
+            }
+          }
+        }
       }
     }
+    proximaAtualizacaoEm
   }
-}
-"""
+}"""
 
-RIO_BLOCK = (
-    "rio { rio_nome { value } rio_nivel { value } "
-    "rio_nivel_tendencia { value } rio_area_drenagem { value } }"
-)
-
+QUERY_HISTORIC = """query Historic($stationCode: String!, $startDate: String!, $endDate: String!, $interval: QueryInterval) {
+  historic(
+    system: Qualle_Hidrometeorologia
+    client: "casa-militar-defesa-civil-rs"
+    stationCode: $stationCode
+    startDate: $startDate
+    endDate: $endDate
+    interval: $interval
+    opts: { ordenacao: ASC }
+  )
+}"""
 
 class ApiError(RuntimeError):
     pass
 
-
 # --------------------------------------------------------------------------- #
 # Camada de acesso a API
 # --------------------------------------------------------------------------- #
-def gql(query: str) -> dict:
+def gql(query: str, variables: dict = None) -> dict:
     """Envia uma consulta GraphQL e devolve o JSON de resposta."""
-    # Adicionado verify=False para ignorar o erro de SSL expirado da Defesa Civil
+    payload = {"query": query}
+    if variables:
+        payload["variables"] = variables
+        
     resp = requests.post(
-        API_URL, json={"query": query}, headers=HEADERS, timeout=TIMEOUT, verify=False
+        API_URL, json=payload, headers=HEADERS, timeout=TIMEOUT, verify=False
     )
     try:
         return resp.json()
     except ValueError:
         resp.raise_for_status()
         raise ApiError(f"Resposta nao-JSON da API (HTTP {resp.status_code}).")
-
-
-def _montar_query(janelas: list[str], com_rio: bool) -> str:
-    return (
-        QUERY_TEMPLATE.replace("%CLIENT%", CLIENT)
-        .replace("%UF%", UF_RS)
-        .replace("%RIO%", RIO_BLOCK if com_rio else "")
-        .replace("%ACUM%", " ".join(f"{j} {{ value }}" for j in janelas))
-    )
-
 
 def _achar_estacoes(obj):
     """Percorre o JSON e devolve todos os dicts que parecem uma estacao."""
@@ -138,7 +380,6 @@ def _achar_estacoes(obj):
         for item in obj:
             yield from _achar_estacoes(item)
 
-
 def _val(d, *path):
     """Navega em dicts aninhados e desembrulha {'value': x}."""
     for p in path:
@@ -148,7 +389,6 @@ def _val(d, *path):
     if isinstance(d, dict) and "value" in d:
         d = d["value"]
     return d
-
 
 def _estacao_para_linha(est: dict) -> dict:
     nome = est.get("name") or {}
@@ -162,7 +402,6 @@ def _estacao_para_linha(est: dict) -> dict:
     for p in (geral, local):
         if p and p not in partes:
             partes.append(p)
-    # descricao da estacao (sem o prefixo/codigo)
     descricao = " - ".join(partes) or prefixo or est.get("codigo")
     cidade = local or geral
 
@@ -189,15 +428,12 @@ def _estacao_para_linha(est: dict) -> dict:
         linha[f"chuva_{campo}"] = v.get("value") if isinstance(v, dict) else v
     return linha
 
-
 def _para_local(dt: pd.Series) -> pd.Series:
     if getattr(dt.dt, "tz", None) is not None:
         return dt.dt.tz_convert(FUSO).dt.tz_localize(None)
     return dt
 
-
 def _parse_ts(serie: pd.Series) -> pd.Series:
-    """Converte para horario de Brasilia (sem fuso). Texto sem fuso e mantido."""
     num = pd.to_numeric(serie, errors="coerce")
     if num.notna().mean() > 0.5:
         med = num.median()
@@ -212,10 +448,8 @@ def _parse_ts(serie: pd.Series) -> pd.Series:
         dt = pd.to_datetime(serie, errors="coerce", utc=True)
     return _para_local(dt)
 
-
 def agora_local() -> pd.Timestamp:
     return pd.Timestamp.now(tz=FUSO).tz_localize(None)
-
 
 def montar_dataframe(payload: dict) -> pd.DataFrame:
     linhas = [_estacao_para_linha(e) for e in _achar_estacoes(payload.get("data"))]
@@ -234,59 +468,45 @@ def montar_dataframe(payload: dict) -> pd.DataFrame:
     df["cidade"] = df["cidade"].fillna("(sem cidade)").astype(str)
     df["descricao"] = df["descricao"].fillna(df["codigo"]).astype(str)
 
-    # rotulo unico para graficos (evita fundir estacoes com a mesma descricao)
     dup = df["descricao"].duplicated(keep=False)
     df["rotulo"] = df["descricao"].where(~dup, df["descricao"] + " (" + df["codigo"] + ")")
     return df
 
-
-# Alterado show_spinner=False para evitar o erro "Cursor is not set" quando importado por scripts locais
 @st.cache_data(ttl=120, show_spinner=False)
 def carregar_estacoes() -> tuple[pd.DataFrame, dict]:
-    """Tenta a consulta completa e vai simplificando se a API recusar campos."""
-    todas = list(JANELAS_CHUVA.values())
-    niveis = [
-        ("completa", todas, True),
-        ("janelas reduzidas", ["h001", "h024"], True),
-        ("sem dados de rio", ["h001", "h024"], False),
-    ]
-    erros: list[str] = []
-    for nome, janelas, com_rio in niveis:
-        try:
-            payload = gql(_montar_query(janelas, com_rio))
-        except Exception as exc:  # rede, timeout, etc.
-            erros.append(f"[{nome}] {type(exc).__name__}: {exc}")
-            continue
-        if payload.get("errors"):
-            msgs = "; ".join(str(e.get("message")) for e in payload["errors"][:3])
-            erros.append(f"[{nome}] GraphQL: {msgs}")
-            if not payload.get("data"):
-                continue
-        df = montar_dataframe(payload)
-        if not df.empty:
-            amostra = next(_achar_estacoes(payload.get("data")), {})
-            return df, {"nivel": nome, "erros": erros, "amostra": amostra}
-        erros.append(f"[{nome}] resposta sem estacoes reconheciveis")
-    raise ApiError("\n".join(erros) or "Falha desconhecida.")
+    """Usa a query autorizada estática."""
+    try:
+        payload = gql(QUERY_TAGS_DATA)
+    except Exception as exc:
+        raise ApiError(f"Erro na conexão com API: {exc}")
+        
+    if payload.get("errors"):
+        msgs = "; ".join(str(e.get("message")) for e in payload["errors"][:3])
+        raise ApiError(f"GraphQL: {msgs}")
+        
+    df = montar_dataframe(payload)
+    if df.empty:
+        raise ApiError("Resposta sem estações reconhecíveis.")
+        
+    amostra = next(_achar_estacoes(payload.get("data")), {})
+    return df, {"nivel": "completa_oficial", "erros": [], "amostra": amostra}
 
-
-# Alterado show_spinner=False 
 @st.cache_data(ttl=300, show_spinner=False)
 def carregar_historico(codigo: str, inicio: str, fim: str, intervalo: str):
-    q = (
-        "query Historic { historic("
-        f"system: {SYSTEM} client: \"{CLIENT}\" stationCode: \"{codigo}\" "
-        f"startDate: \"{inicio}\" endDate: \"{fim}\" interval: {intervalo}) }}"
-    )
-    payload = gql(q)
+    """Envia a query autorizada com as variaveis."""
+    variables = {
+        "stationCode": codigo,
+        "startDate": inicio,
+        "endDate": fim,
+        "interval": intervalo
+    }
+    payload = gql(QUERY_HISTORIC, variables=variables)
     if payload.get("errors") and not payload.get("data"):
         msgs = "; ".join(str(e.get("message")) for e in payload["errors"][:3])
         raise ApiError(msgs)
     return payload.get("data", {}).get("historic")
 
-
 def historico_para_df(obj) -> pd.DataFrame:
-    """Normaliza a resposta (formato livre) de `historic` em uma tabela."""
     if isinstance(obj, str):
         try:
             obj = json.loads(obj)
@@ -322,10 +542,8 @@ def historico_para_df(obj) -> pd.DataFrame:
             df[col] = conv
     return df
 
-
 @st.cache_data(ttl=300, show_spinner=False)
 def carregar_coleta() -> pd.DataFrame:
-    """Le o historico gravado pelo coletor (branch 'dados'). Vazio se nao existir."""
     try:
         resp = requests.get(HISTORICO_URL, timeout=20, headers=HEADERS)
         if resp.status_code != 200:
@@ -342,15 +560,12 @@ def carregar_coleta() -> pd.DataFrame:
         df["chuva_h001"] = pd.to_numeric(df["chuva_h001"], errors="coerce")
     return df.dropna(subset=["quando"]).sort_values("quando").reset_index(drop=True)
 
-
 # --------------------------------------------------------------------------- #
 # Calculos de variacao do nivel
 # --------------------------------------------------------------------------- #
 HORIZONTES = (1, 3, 6, 24)
 
-
 def calcular_variacoes(serie: pd.Series) -> dict:
-    """Variacao (mm) do nivel nas ultimas 1, 3, 6 e 24 h. serie: indice datetime."""
     s = serie.dropna()
     s = s[~s.index.duplicated(keep="last")].sort_index()
     if len(s) < 2:
@@ -361,14 +576,12 @@ def calcular_variacoes(serie: pd.Series) -> dict:
         t_ref = t_fim - pd.Timedelta(hours=h)
         pos = s.index.searchsorted(t_ref, side="right") - 1
         if pos < 0 or t_ref - s.index[pos] > pd.Timedelta(minutes=max(40, 10 * h)):
-            out[f"d{h}"] = None  # a serie nao cobre esse horizonte
+            out[f"d{h}"] = None
         else:
             out[f"d{h}"] = v_fim - float(s.iloc[pos])
     return out
 
-
 def variacoes_todas(coleta: pd.DataFrame, niveis_atuais: dict) -> pd.DataFrame:
-    """Variacoes por estacao, usando o historico coletado + leitura atual."""
     agora = agora_local()
     linhas = []
     sub = coleta[coleta["codigo"].isin(niveis_atuais)]
@@ -383,7 +596,6 @@ def variacoes_todas(coleta: pd.DataFrame, niveis_atuais: dict) -> pd.DataFrame:
     cols = ["codigo"] + [f"d{h}" for h in HORIZONTES]
     return pd.DataFrame(linhas, columns=cols)
 
-
 def situacao(delta_1h, limiar: float) -> str | None:
     if delta_1h is None or pd.isna(delta_1h):
         return None
@@ -392,7 +604,6 @@ def situacao(delta_1h, limiar: float) -> str | None:
     if delta_1h < -limiar:
         return "⬇️ descendo"
     return "➡️ estável"
-
 
 # --------------------------------------------------------------------------- #
 # Utilidades de interface
@@ -403,9 +614,7 @@ def fmt_mm(v, casas: int = 0) -> str:
     s = f"{v:,.{casas}f}".replace(",", "X").replace(".", ",").replace("X", ".")
     return f"{s} mm"
 
-
 def seta_tendencia(v) -> str:
-    """Traduz o campo de tendencia informado pela API."""
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return "-"
     try:
@@ -422,7 +631,6 @@ def seta_tendencia(v) -> str:
             return f"➡️ {v}"
         return str(v)
 
-
 def barras(d: pd.DataFrame, cat: str, val: str, titulo: str, cor: str):
     chart = (
         alt.Chart(d)
@@ -436,9 +644,7 @@ def barras(d: pd.DataFrame, cat: str, val: str, titulo: str, cor: str):
     )
     st.altair_chart(chart)
 
-
 def agregar(df: pd.DataFrame, por: str, col: str) -> pd.DataFrame:
-    """Devolve tabela [rotulo, valor, estacoes] conforme o agrupamento."""
     base = df.dropna(subset=[col])
     if por == "Estação":
         out = base[["rotulo", col]].rename(columns={col: "valor"})
@@ -447,7 +653,6 @@ def agregar(df: pd.DataFrame, por: str, col: str) -> pd.DataFrame:
     chave = "bacia" if por == "Bacia" else "cidade"
     g = base.groupby(chave).agg(valor=(col, "max"), estacoes=("codigo", "count"))
     return g.reset_index().rename(columns={chave: "rotulo"})
-
 
 def filtros_laterais(df: pd.DataFrame) -> pd.DataFrame:
     with st.sidebar:
@@ -483,12 +688,10 @@ def filtros_laterais(df: pd.DataFrame) -> pd.DataFrame:
         out = out[mask]
     return out
 
-
 # --------------------------------------------------------------------------- #
 # Aba Rios
 # --------------------------------------------------------------------------- #
 def _serie_do_rio(cod: str, coleta: pd.DataFrame, horas: int, intervalo: str):
-    """Serie de nivel (mm) de uma estacao. Prefere o historico coletado."""
     if coleta is not None and not coleta.empty:
         g = coleta[coleta["codigo"] == cod]
         if len(g) >= 2:
@@ -514,7 +717,6 @@ def _serie_do_rio(cod: str, coleta: pd.DataFrame, horas: int, intervalo: str):
     col = st.selectbox("Coluna do nível no histórico da API", numericas,
                        index=numericas.index(palpite), key=f"colnivel_{cod}")
     return tab[col], None, "histórico da API da Defesa Civil"
-
 
 def detalhe_rio(r: pd.DataFrame, coleta: pd.DataFrame, limiar: float):
     st.subheader("Detalhe da estação")
@@ -620,11 +822,9 @@ def detalhe_rio(r: pd.DataFrame, coleta: pd.DataFrame, limiar: float):
     with st.expander("Dados da estação"):
         st.dataframe(tabela, hide_index=True)
 
-
 def aba_rios(df: pd.DataFrame, coleta: pd.DataFrame):
     if "rio_nivel" not in df or df["rio_nivel"].notna().sum() == 0:
-        st.info("Nenhuma estação com nível de rio nos filtros atuais "
-                "(ou a API não retornou esse campo; veja a aba Diagnóstico).")
+        st.info("Nenhuma estação com nível de rio nos filtros atuais.")
         return
     r = df.dropna(subset=["rio_nivel"]).copy()
     rn = r["rio_nome"].fillna("").astype(str).str.strip()
@@ -696,7 +896,6 @@ def aba_rios(df: pd.DataFrame, coleta: pd.DataFrame):
     st.divider()
     detalhe_rio(r, coleta, limiar)
 
-
 # --------------------------------------------------------------------------- #
 # Demais abas
 # --------------------------------------------------------------------------- #
@@ -743,7 +942,6 @@ def aba_chuva(df: pd.DataFrame):
         st.dataframe(df.sort_values(col, ascending=False)[cols],
                      column_config=cfg, hide_index=True)
 
-
 def aba_mapa(df: pd.DataFrame):
     modo = st.radio("Mostrar no mapa", ["Chuva", "Nível do rio"], horizontal=True)
     if modo == "Chuva":
@@ -768,7 +966,6 @@ def aba_mapa(df: pd.DataFrame):
         m["tamanho"] = 1500 + 12000 * valor / max(float(valor.max()), 1.0)
         st.map(m, latitude="lat", longitude="lon", size="tamanho", color=cor)
         st.caption("O tamanho do círculo é proporcional ao valor medido.")
-
 
 def aba_historico(df: pd.DataFrame):
     st.write("Série histórica de qualquer estação, direto da API.")
@@ -811,7 +1008,6 @@ def aba_historico(df: pd.DataFrame):
     with st.expander("Resposta bruta da API"):
         st.json(bruto if not isinstance(bruto, str) else {"historic": bruto})
 
-
 def aba_diagnostico(meta: dict | None, erro: str | None = None,
                     coleta: pd.DataFrame | None = None):
     st.write("Útil para descobrir quais dados a API realmente oferece.")
@@ -834,30 +1030,11 @@ def aba_diagnostico(meta: dict | None, erro: str | None = None,
         st.write(f"{len(coleta)} registros de {coleta['codigo'].nunique()} estações, "
                  f"de {coleta['quando'].min():%d/%m %H:%M} até {coleta['quando'].max():%d/%m %H:%M}.")
 
-    st.subheader("Explorar o esquema GraphQL")
-    if st.button("Listar consultas disponíveis (introspection)"):
-        q = ("{ __schema { queryType { fields { name args { name type { name kind "
-             "ofType { name } } } } } subscriptionType { fields { name } } } }")
-        try:
-            st.json(gql(q))
-        except Exception as exc:
-            st.error(str(exc))
-
-    st.subheader("Consulta livre")
-    q = st.text_area("GraphQL", value="{ __typename }", height=140)
-    if st.button("Executar consulta"):
-        try:
-            st.json(gql(q))
-        except Exception as exc:
-            st.error(str(exc))
-
 
 # --------------------------------------------------------------------------- #
 # App
 # --------------------------------------------------------------------------- #
 def main():
-    # Descomente e use um context do streamlit internamente se quiser spinners na UI
-    # with st.spinner("Buscando dados..."):
     st.set_page_config(page_title="Chuva e Rios - RS", page_icon="🌧️", layout="wide")
     st.title("🌊 Rios e chuva no RS")
     st.caption("Rede Hidrometeorológica da Defesa Civil RS · dados em quase tempo real")
