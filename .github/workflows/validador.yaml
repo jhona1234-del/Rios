@@ -1,0 +1,21 @@
+name: Validador API
+on:
+  workflow_dispatch: # Permite executar o script manualmente no GitHub
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar bibliotecas
+        run: pip install requests urllib3
+
+      - name: Rodar o validador
+        run: python validador.py
