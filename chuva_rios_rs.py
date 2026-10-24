@@ -73,7 +73,7 @@ INTERVALOS_HIST = {
 }
 
 QUERY_TEMPLATE = """
-query Estacoes {
+query Tags_data {
   tags_data(
     clients: ["%CLIENT%"]
   ) {
